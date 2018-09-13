@@ -1,4 +1,5 @@
 require 'faraday'
+require 'pry'
 
 class CleverTap
   class NotConsistentArrayError < RuntimeError
@@ -13,6 +14,7 @@ class CleverTap
     HTTP_PATH = 'upload'.freeze
     DEFAULT_SUCCESS = proc { |r| r.to_s }
     DEFAULT_FAILURE = proc { |r| r.to_s }
+    DEFAULT_FETCH_BATCH_SIZE = 50
 
     ACCOUNT_HEADER = 'X-CleverTap-Account-Id'.freeze
     PASSCODE_HEADER = 'X-CleverTap-Passcode'.freeze
@@ -68,7 +70,26 @@ class CleverTap
       all_responses
     end
 
-    private
+    def fetch_profiles(*args)
+      fetch(Profile, *args)
+    end
+
+    def fetch_events(*args)
+      fetch(Event, *args)
+    end
+
+    def fetch(entity, query, options = {})
+      puts 'gets into fetch'
+      raise 'Query must be a Hash' unless query.is_a?(Hash)
+      batch_size = options[:batch_size] || DEFAULT_FETCH_BATCH_SIZE
+      @uri = entity::FETCH_URI
+      cursor = fetch_cursor(query.to_json, batch_size)
+
+      return unless cursor
+      records = fetch_all_records(cursor)
+
+      records.map { |r| entity.parse(r) }
+    end
 
     def batched_upload(entity, payload, dry_run)
       payload.each_slice(entity.upload_limit) do |group|
@@ -78,11 +99,7 @@ class CleverTap
 
         clevertap_response = Response.new(response)
 
-        if clevertap_response.success
-          @on_success.call(clevertap_response)
-        else
-          @on_failure.call(clevertap_response)
-        end
+        handle_callbacks(clevertap_response)
 
         yield(clevertap_response) if block_given?
       end
@@ -108,6 +125,48 @@ class CleverTap
 
     def assign_passcode(passcode)
       passcode || CleverTap.account_passcode || raise('Clever Tap `passcode` missing')
+    end
+
+    def handle_callbacks(response)
+      if response.success
+        @on_success.call(response)
+      else
+        @on_failure.call(response)
+      end
+    end
+
+    def fetch_all_records(cursor)
+      current_cursor = cursor
+      records = []
+
+      while current_cursor do
+        current_records, current_cursor = 
+          fetch_records_and_next_cursor(current_cursor)
+        records << current_records
+      end
+
+      records.flatten.compact
+    end
+
+    def fetch_cursor(query, batch_size)
+      req = post(@uri, query) do |request|
+        request.params.merge!(batch_size: batch_size)
+      end
+      res = Response.new(req)
+
+      handle_callbacks(res)
+      return unless res.success
+      res.response['cursor']
+    end
+
+    def fetch_records_and_next_cursor(cursor)
+      # NOTE: parameter interpolated because when passed in a block as
+      # { |req| req.params.merge!(cursor: body['cursor']) }
+      # it gets URL encoded which breaks it
+      res = Response.new(get("#{@uri}?cursor=#{cursor}"))
+      handle_callbacks(res)
+      return [[], nil] unless res.success
+      [res.response['records'], res.response['next_cursor']]
     end
   end
 end

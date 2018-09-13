@@ -9,8 +9,6 @@ group :test do
   gem 'vcr'
 end
 
-group :test, :development do
-  gem 'pry-byebug'
-end
+gem 'pry-byebug'
 
 gemspec
